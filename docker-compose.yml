@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  gas-alert-bot:
+    build: .
+    container_name: gas-alert-bot
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - ETHERSCAN_API_KEY=${ETHERSCAN_API_KEY}
+    volumes:
+      - ./data:/app/data
+      - ./user_data.json:/app/user_data.json
+    env_file:
+      - .env
+    networks:
+      - gas-alert-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  gas-alert-network:
+    driver: bridge
+
+# 可选：添加监控服务
+# services:
+#   gas-alert-bot:
+#     # ... 上述配置 ...
+#   
+#   watchtower:
+#     image: containrrr/watchtower
+#     container_name: watchtower
+#     restart: unless-stopped
+#     volumes:
+#       - /var/run/docker.sock:/var/run/docker.sock
+#     command: --interval 3600 gas-alert-bot
+#     networks:
+#       - gas-alert-network
