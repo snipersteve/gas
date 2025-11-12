@@ -81,48 +81,104 @@ class GasAlertBot:
             )
     
     async def add_address(self, update: Update, user_id: int, address: str):
-        """添加地址到监控列表"""
+        """添加地址到监控列表（带重试机制）"""
         if not self.balance_checker.is_valid_address(address):
             await update.message.reply_text("❌ 无效的钱包地址格式")
             return
-        
-        try:
-            # 检查当前余额
-            balance = self.balance_checker.get_bnb_balance(address)
-            
-            # 添加到用户监控列表
-            if self.user_manager.add_address(user_id, address):
-                status = "🔴 余额不足" if balance < LOW_BALANCE_THRESHOLD else "✅ 余额充足"
-                await update.message.reply_text(
-                    f"✅ 地址添加成功！\n\n"
-                    f"📍 地址: {address[:10]}...{address[-8:]}\n"
-                    f"💰 当前余额: {balance:.6f} BNB\n"
-                    f"📊 状态: {status}"
-                )
-            else:
-                await update.message.reply_text("ℹ️ 该地址已在监控列表中")
-                
-        except Exception as e:
-            await update.message.reply_text(f"❌ 添加失败: {str(e)}")
+
+        # 带重试的余额查询
+        max_retries = 3
+        balance = None
+
+        for attempt in range(max_retries):
+            try:
+                balance = await self.balance_checker.get_bnb_balance(address)
+                break  # 成功则跳出
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 2
+                    await asyncio.sleep(wait_time)
+                else:
+                    await update.message.reply_text(f"❌ 查询余额失败（已重试{max_retries}次）: {str(e)}")
+                    return
+
+        # 添加到用户监控列表
+        if self.user_manager.add_address(user_id, address):
+            status = "🔴 余额不足" if balance < LOW_BALANCE_THRESHOLD else "✅ 余额充足"
+            await update.message.reply_text(
+                f"✅ 地址添加成功！\n\n"
+                f"📍 地址: {address[:10]}...{address[-8:]}\n"
+                f"💰 当前余额: {balance:.6f} BNB\n"
+                f"📊 状态: {status}"
+            )
+        else:
+            await update.message.reply_text("ℹ️ 该地址已在监控列表中")
     
+    async def query_address_with_retry(self, address: str):
+        """查询单个地址余额（单次尝试）"""
+        try:
+            balance = await self.balance_checker.get_bnb_balance(address)
+            return {'address': address, 'balance': balance, 'success': True}
+        except Exception as e:
+            return {'address': address, 'balance': 0.0, 'success': False, 'error': str(e)}
+
+    async def query_batch_with_delay(self, addresses, delay_between_requests=0.3):
+        """批量查询地址，请求之间有延迟以避免触发API限制"""
+        results = []
+        for address in addresses:
+            result = await self.query_address_with_retry(address)
+            results.append(result)
+            # 每个请求后都添加延迟，包括最后一个（0.3秒 = 每秒3.3次）
+            await asyncio.sleep(delay_between_requests)
+        return results
+
     async def list_addresses_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """列出监控地址"""
+        """列出监控地址（带批次重试机制）"""
         user_id = update.effective_user.id
         addresses = self.user_manager.get_addresses(user_id)
-        
+
         if not addresses:
             await update.message.reply_text("📝 您还没有添加任何监控地址\n\n发送钱包地址开始监控！")
             return
-        
+
+        await update.message.reply_text("🔄 正在查询地址余额...")
+
+        # 批次重试逻辑
+        successful_results = {}
+        addresses_to_query = addresses.copy()
+        retry_round = 0
+        max_retry_rounds = 5  # list命令最多重试5轮
+
+        while addresses_to_query and retry_round < max_retry_rounds:
+            retry_round += 1
+
+            if retry_round > 1:
+                wait_time = min(retry_round * 2, 10)
+                await asyncio.sleep(wait_time)
+
+            # 限速查询：请求之间有0.3秒延迟（每秒3.3次）
+            results = await self.query_batch_with_delay(addresses_to_query, delay_between_requests=0.3)
+
+            # 分离成功和失败
+            failed_addresses = []
+            for result in results:
+                if result['success']:
+                    successful_results[result['address']] = result['balance']
+                else:
+                    failed_addresses.append(result['address'])
+
+            addresses_to_query = failed_addresses
+
+        # 生成消息
         message = "📋 您的监控列表：\n\n"
         for i, address in enumerate(addresses, 1):
-            try:
-                balance = self.balance_checker.get_bnb_balance(address)
+            if address in successful_results:
+                balance = successful_results[address]
                 status = "🔴" if balance < LOW_BALANCE_THRESHOLD else "✅"
                 message += f"{i}. {status} {address[:10]}...{address[-8:]}\n   💰 {balance:.6f} BNB\n\n"
-            except Exception as e:
-                message += f"{i}. ❌ {address[:10]}...{address[-8:]}\n   ⚠️ 查询失败: {str(e)[:30]}...\n\n"
-        
+            else:
+                message += f"{i}. ❌ {address[:10]}...{address[-8:]}\n   ⚠️ 查询失败（已重试{retry_round}次）\n\n"
+
         await update.message.reply_text(message)
     
     async def remove_address_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -141,23 +197,50 @@ class GasAlertBot:
             await update.message.reply_text("❌ 地址不在监控列表中")
     
     async def check_balance_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """立即检查余额"""
+        """立即检查余额（带批次重试机制）"""
         user_id = update.effective_user.id
         addresses = self.user_manager.get_addresses(user_id)
-        
+
         if not addresses:
             await update.message.reply_text("📝 您还没有添加任何监控地址")
             return
-        
+
         await update.message.reply_text("🔄 正在检查所有地址余额...")
-        
+
+        # 批次重试逻辑
+        successful_results = {}
+        addresses_to_query = addresses.copy()
+        retry_round = 0
+        max_retry_rounds = 5
+
+        while addresses_to_query and retry_round < max_retry_rounds:
+            retry_round += 1
+
+            if retry_round > 1:
+                wait_time = min(retry_round * 2, 10)
+                await asyncio.sleep(wait_time)
+
+            # 限速查询：请求之间有0.3秒延迟（每秒3.3次）
+            results = await self.query_batch_with_delay(addresses_to_query, delay_between_requests=0.3)
+
+            # 分离成功和失败
+            failed_addresses = []
+            for result in results:
+                if result['success']:
+                    successful_results[result['address']] = result['balance']
+                else:
+                    failed_addresses.append(result['address'])
+
+            addresses_to_query = failed_addresses
+
+        # 统计并发送警告
         low_balance_count = 0
-        total_count = len(addresses)
-        
+        failed_count = len(addresses) - len(successful_results)
+
         for address in addresses:
-            try:
-                is_low, balance = self.balance_checker.check_low_balance(address, LOW_BALANCE_THRESHOLD)
-                if is_low:
+            if address in successful_results:
+                balance = successful_results[address]
+                if balance < LOW_BALANCE_THRESHOLD:
                     low_balance_count += 1
                     await update.message.reply_text(
                         f"🔴 余额不足警告！\n\n"
@@ -165,12 +248,12 @@ class GasAlertBot:
                         f"💰 余额: {balance:.6f} BNB\n"
                         f"⚠️ 低于阈值: {LOW_BALANCE_THRESHOLD} BNB"
                     )
-            except Exception as e:
+            else:
                 await update.message.reply_text(
-                    f"❌ 检查失败\n📍 地址: {address[:10]}...{address[-8:]}\n⚠️ 错误: {str(e)}"
+                    f"❌ 检查失败\n📍 地址: {address[:10]}...{address[-8:]}\n⚠️ 已重试{retry_round}次仍失败"
                 )
-        
-        summary = f"✅ 检查完成！\n📊 总计: {total_count} 个地址\n🔴 余额不足: {low_balance_count} 个"
+
+        summary = f"✅ 检查完成！\n📊 总计: {len(addresses)} 个地址\n✅ 成功: {len(successful_results)} 个\n❌ 失败: {failed_count} 个\n🔴 余额不足: {low_balance_count} 个"
         await update.message.reply_text(summary)
     
     async def send_low_balance_alert(self, user_id: int, address: str, balance: float):
