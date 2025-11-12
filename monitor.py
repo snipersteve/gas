@@ -94,11 +94,13 @@ class BalanceMonitor:
         for address, balance in successful_results.items():
             user_ids = address_to_users[address]
 
-            # 检查余额是否低于阈值
-            if balance < LOW_BALANCE_THRESHOLD:
-                print(f"🔴 Low balance detected: {address[:10]}...{address[-8:]} = {balance:.6f} BNB")
+            # 为每个用户检查其自定义阈值
+            for user_id in user_ids:
+                threshold = self.user_manager.get_threshold(user_id)
 
-                for user_id in user_ids:
+                if balance < threshold:
+                    print(f"🔴 Low balance detected for user {user_id}: {address[:10]}...{address[-8:]} = {balance:.6f} BNB (threshold: {threshold})")
+
                     if self.user_manager.should_send_alert(user_id, address, current_time):
                         await self.bot.send_low_balance_alert(user_id, address, balance)
                         self.user_manager.record_alert(user_id, address, current_time)
@@ -106,8 +108,8 @@ class BalanceMonitor:
                         print(f"📤 Alert sent to user {user_id} for address {address[:10]}...")
                     else:
                         print(f"⏭️ Skipping alert for user {user_id} (recently sent)")
-            else:
-                print(f"✅ Balance OK: {address[:10]}...{address[-8:]} = {balance:.6f} BNB")
+                else:
+                    print(f"✅ Balance OK for user {user_id}: {address[:10]}...{address[-8:]} = {balance:.6f} BNB (threshold: {threshold})")
 
         print(f"✅ Balance check completed: {success_count} successful, {failed_count} failed, {alerts_sent} alerts sent")
     

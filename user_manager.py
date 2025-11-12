@@ -31,15 +31,16 @@ class UserManager:
         """为用户添加监控地址"""
         user_id_str = str(user_id)
         address = address.lower()
-        
+
         if user_id_str not in self.users_data:
             self.users_data[user_id_str] = {
                 'addresses': [],
-                'last_alert': {}
+                'last_alert': {},
+                'threshold': 0.05  # 默认阈值
             }
-        
+
         addresses = self.users_data[user_id_str]['addresses']
-        
+
         if address not in addresses:
             addresses.append(address)
             self.save_data()
@@ -100,9 +101,10 @@ class UserManager:
         if user_id_str not in self.users_data:
             self.users_data[user_id_str] = {
                 'addresses': [],
-                'last_alert': {}
+                'last_alert': {},
+                'threshold': 0.05
             }
-        
+
         self.users_data[user_id_str]['last_alert'][address] = current_time
         self.save_data()
     
@@ -116,3 +118,27 @@ class UserManager:
                     address_to_users[address] = []
                 address_to_users[address].append(user_id)
         return address_to_users
+
+    def get_threshold(self, user_id: int) -> float:
+        """获取用户的余额阈值"""
+        user_id_str = str(user_id)
+        if user_id_str in self.users_data:
+            # 兼容旧数据，如果没有threshold字段则返回默认值
+            return self.users_data[user_id_str].get('threshold', 0.05)
+        return 0.05
+
+    def set_threshold(self, user_id: int, threshold: float) -> bool:
+        """设置用户的余额阈值"""
+        user_id_str = str(user_id)
+
+        if user_id_str not in self.users_data:
+            self.users_data[user_id_str] = {
+                'addresses': [],
+                'last_alert': {},
+                'threshold': threshold
+            }
+        else:
+            self.users_data[user_id_str]['threshold'] = threshold
+
+        self.save_data()
+        return True

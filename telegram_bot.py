@@ -20,11 +20,13 @@ class GasAlertBot:
         self.application.add_handler(CommandHandler("list", self.list_addresses_command))
         self.application.add_handler(CommandHandler("remove", self.remove_address_command))
         self.application.add_handler(CommandHandler("check", self.check_balance_command))
+        self.application.add_handler(CommandHandler("setthreshold", self.set_threshold_command))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_address))
     
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """开始命令"""
         user_id = update.effective_user.id
+        threshold = self.user_manager.get_threshold(user_id)
         welcome_message = (
             "🚀 欢迎使用BSC Gas余额监控机器人！\n\n"
             "📝 使用方法：\n"
@@ -33,13 +35,17 @@ class GasAlertBot:
             "• /list - 查看监控列表\n"
             "• /remove <地址> - 移除监控\n"
             "• /check - 立即检查所有地址\n"
+            "• /setthreshold <数值> - 设置余额阈值\n"
             "• /help - 查看帮助\n\n"
-            f"⚠️ 当BNB余额低于 {LOW_BALANCE_THRESHOLD} 时会自动推送提醒"
+            f"⚠️ 当前余额阈值: {threshold} BNB\n"
+            f"余额低于该值时会自动推送提醒"
         )
         await update.message.reply_text(welcome_message)
     
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """帮助命令"""
+        user_id = update.effective_user.id
+        threshold = self.user_manager.get_threshold(user_id)
         help_message = (
             "📋 命令列表：\n\n"
             "/start - 开始使用机器人\n"
@@ -47,11 +53,13 @@ class GasAlertBot:
             "/list - 查看当前监控的地址\n"
             "/remove <地址> - 移除监控地址\n"
             "/check - 立即检查所有地址余额\n"
+            "/setthreshold <数值> - 设置余额阈值\n"
             "/help - 显示此帮助信息\n\n"
             "💡 提示：\n"
             "• 直接发送钱包地址也可以添加监控\n"
             "• 地址格式：0x开头的42位十六进制字符\n"
-            f"• 余额低于 {LOW_BALANCE_THRESHOLD} BNB 时会收到提醒"
+            f"• 当前余额阈值: {threshold} BNB\n"
+            "• 设置阈值示例: /setthreshold 0.1"
         )
         await update.message.reply_text(help_message)
     
@@ -104,11 +112,13 @@ class GasAlertBot:
 
         # 添加到用户监控列表
         if self.user_manager.add_address(user_id, address):
-            status = "🔴 余额不足" if balance < LOW_BALANCE_THRESHOLD else "✅ 余额充足"
+            threshold = self.user_manager.get_threshold(user_id)
+            status = "🔴 余额不足" if balance < threshold else "✅ 余额充足"
             await update.message.reply_text(
                 f"✅ 地址添加成功！\n\n"
                 f"📍 地址: {address[:10]}...{address[-8:]}\n"
                 f"💰 当前余额: {balance:.6f} BNB\n"
+                f"⚠️ 阈值设置: {threshold} BNB\n"
                 f"📊 状态: {status}"
             )
         else:
@@ -170,11 +180,12 @@ class GasAlertBot:
             addresses_to_query = failed_addresses
 
         # 生成消息
-        message = "📋 您的监控列表：\n\n"
+        threshold = self.user_manager.get_threshold(user_id)
+        message = f"📋 您的监控列表：\n\n⚠️ 当前阈值: {threshold} BNB\n\n"
         for i, address in enumerate(addresses, 1):
             if address in successful_results:
                 balance = successful_results[address]
-                status = "🔴" if balance < LOW_BALANCE_THRESHOLD else "✅"
+                status = "🔴" if balance < threshold else "✅"
                 message += f"{i}. {status} {address[:10]}...{address[-8:]}\n   💰 {balance:.6f} BNB\n\n"
             else:
                 message += f"{i}. ❌ {address[:10]}...{address[-8:]}\n   ⚠️ 查询失败（已重试{retry_round}次）\n\n"
@@ -234,19 +245,20 @@ class GasAlertBot:
             addresses_to_query = failed_addresses
 
         # 统计并发送警告
+        threshold = self.user_manager.get_threshold(user_id)
         low_balance_count = 0
         failed_count = len(addresses) - len(successful_results)
 
         for address in addresses:
             if address in successful_results:
                 balance = successful_results[address]
-                if balance < LOW_BALANCE_THRESHOLD:
+                if balance < threshold:
                     low_balance_count += 1
                     await update.message.reply_text(
                         f"🔴 余额不足警告！\n\n"
                         f"📍 地址: {address[:10]}...{address[-8:]}\n"
                         f"💰 余额: {balance:.6f} BNB\n"
-                        f"⚠️ 低于阈值: {LOW_BALANCE_THRESHOLD} BNB"
+                        f"⚠️ 低于阈值: {threshold} BNB"
                     )
             else:
                 await update.message.reply_text(
@@ -259,16 +271,56 @@ class GasAlertBot:
     async def send_low_balance_alert(self, user_id: int, address: str, balance: float):
         """发送余额不足警告"""
         try:
+            threshold = self.user_manager.get_threshold(user_id)
             message = (
                 f"🚨 GAS余额不足警告！\n\n"
                 f"📍 地址: {address[:10]}...{address[-8:]}\n"
                 f"💰 当前余额: {balance:.6f} BNB\n"
-                f"⚠️ 阈值: {LOW_BALANCE_THRESHOLD} BNB\n\n"
+                f"⚠️ 阈值: {threshold} BNB\n\n"
                 f"请及时充值以确保交易正常进行！"
             )
             await self.application.bot.send_message(chat_id=user_id, text=message)
         except Exception as e:
             print(f"Failed to send alert to user {user_id}: {str(e)}")
+
+    async def set_threshold_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """设置余额阈值命令"""
+        user_id = update.effective_user.id
+
+        if not context.args:
+            current_threshold = self.user_manager.get_threshold(user_id)
+            await update.message.reply_text(
+                f"⚠️ 请提供阈值数值\n\n"
+                f"当前阈值: {current_threshold} BNB\n\n"
+                f"使用方法：/setthreshold 0.1\n"
+                f"示例：设置为0.1个BNB"
+            )
+            return
+
+        try:
+            threshold = float(context.args[0])
+
+            if threshold <= 0:
+                await update.message.reply_text("❌ 阈值必须大于0")
+                return
+
+            if threshold > 100:
+                await update.message.reply_text("❌ 阈值不能超过100 BNB")
+                return
+
+            self.user_manager.set_threshold(user_id, threshold)
+            await update.message.reply_text(
+                f"✅ 余额阈值已更新！\n\n"
+                f"⚠️ 新阈值: {threshold} BNB\n"
+                f"当余额低于此值时会收到提醒"
+            )
+        except ValueError:
+            await update.message.reply_text(
+                "❌ 无效的数值格式\n\n"
+                "请输入有效的数字，例如：\n"
+                "/setthreshold 0.05\n"
+                "/setthreshold 0.1"
+            )
     
     def run(self):
         """运行机器人"""
