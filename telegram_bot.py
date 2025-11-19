@@ -125,12 +125,28 @@ class GasAlertBot:
             await update.message.reply_text("ℹ️ 该地址已在监控列表中")
     
     async def query_address_with_retry(self, address: str):
-        """查询单个地址余额（单次尝试）"""
+        """查询单个地址余额（单次尝试）- 包含BNB、USDT、USDC"""
         try:
-            balance = await self.balance_checker.get_bnb_balance(address)
-            return {'address': address, 'balance': balance, 'success': True}
+            # 同时查询BNB、USDT、USDC
+            balances = await self.balance_checker.get_all_balances(address)
+            return {
+                'address': address,
+                'balance': balances['BNB'],
+                'usdt': balances['USDT'],
+                'usdc': balances['USDC'],
+                'total_u': balances['USDT'] + balances['USDC'],
+                'success': True
+            }
         except Exception as e:
-            return {'address': address, 'balance': 0.0, 'success': False, 'error': str(e)}
+            return {
+                'address': address,
+                'balance': 0.0,
+                'usdt': 0.0,
+                'usdc': 0.0,
+                'total_u': 0.0,
+                'success': False,
+                'error': str(e)
+            }
 
     async def query_batch_with_delay(self, addresses, delay_between_requests=0.3):
         """批量查询地址，请求之间有延迟以避免触发API限制"""
@@ -173,22 +189,34 @@ class GasAlertBot:
             failed_addresses = []
             for result in results:
                 if result['success']:
-                    successful_results[result['address']] = result['balance']
+                    successful_results[result['address']] = result
                 else:
                     failed_addresses.append(result['address'])
 
             addresses_to_query = failed_addresses
 
-        # 生成消息
+        # 生成消息并统计总U
         threshold = self.user_manager.get_threshold(user_id)
+        total_u = 0.0
         message = f"📋 您的监控列表：\n\n⚠️ 当前阈值: {threshold} BNB\n\n"
+
         for i, address in enumerate(addresses, 1):
             if address in successful_results:
-                balance = successful_results[address]
+                result = successful_results[address]
+                balance = result['balance']
+                u_amount = result['total_u']
+                total_u += u_amount
+
                 status = "🔴" if balance < threshold else "✅"
-                message += f"{i}. {status} {address[:10]}...{address[-8:]}\n   💰 {balance:.6f} BNB\n\n"
+                message += f"{i}. {status} {address[:10]}...{address[-8:]}\n"
+                message += f"   💰 BNB: {balance:.6f}\n"
+                message += f"   💵 U: {u_amount:.2f}\n\n"
             else:
                 message += f"{i}. ❌ {address[:10]}...{address[-8:]}\n   ⚠️ 查询失败（已重试{retry_round}次）\n\n"
+
+        # 添加总计
+        message += f"━━━━━━━━━━━━━━━━\n"
+        message += f"💵 总计 U: {total_u:.2f}\n"
 
         await update.message.reply_text(message)
     
@@ -238,7 +266,7 @@ class GasAlertBot:
             failed_addresses = []
             for result in results:
                 if result['success']:
-                    successful_results[result['address']] = result['balance']
+                    successful_results[result['address']] = result
                 else:
                     failed_addresses.append(result['address'])
 
@@ -251,13 +279,15 @@ class GasAlertBot:
 
         for address in addresses:
             if address in successful_results:
-                balance = successful_results[address]
+                result = successful_results[address]
+                balance = result['balance']
                 if balance < threshold:
                     low_balance_count += 1
                     await update.message.reply_text(
                         f"🔴 余额不足警告！\n\n"
                         f"📍 地址: {address[:10]}...{address[-8:]}\n"
-                        f"💰 余额: {balance:.6f} BNB\n"
+                        f"💰 BNB余额: {balance:.6f}\n"
+                        f"💵 U余额: {result['total_u']:.2f}\n"
                         f"⚠️ 低于阈值: {threshold} BNB"
                     )
             else:

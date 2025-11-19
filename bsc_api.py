@@ -131,17 +131,77 @@ class BSCBalanceChecker:
             print(f"Error checking balance for {address}: {str(e)}")
             return False, 0.0
 
-    async def get_token_balance(self, address, contract_address):
-        """获取指定地址的ERC20代币余额（异步）"""
+    async def get_token_balance_via_rpc(self, address, contract_address):
+        """通过RPC节点获取ERC20代币余额（备用方法，无需API密钥）"""
         if not self.is_valid_address(address):
             raise ValueError(f"Invalid address: {address}")
 
         if not self.is_valid_address(contract_address):
             raise ValueError(f"Invalid contract address: {contract_address}")
 
+        # 轮询使用不同的RPC节点
+        rpc_url = self.rpc_urls[self.current_rpc_index % len(self.rpc_urls)]
+        self.current_rpc_index += 1
+
+        # 构造balanceOf(address)调用
+        # balanceOf函数选择器: 0x70a08231
+        # 参数: 地址（补齐到32字节）
+        address_param = address[2:].lower().zfill(64)  # 去掉0x，补齐到64位
+        data = f"0x70a08231{address_param}"
+
+        # JSON-RPC请求 - eth_call调用合约方法
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "eth_call",
+            "params": [
+                {
+                    "to": contract_address,
+                    "data": data
+                },
+                "latest"
+            ],
+            "id": 1
+        }
+
+        try:
+            session = await self.get_session()
+            async with session.post(rpc_url, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                response.raise_for_status()
+                result = await response.json()
+
+                if 'result' in result:
+                    # 结果是十六进制字符串
+                    balance_wei = int(result['result'], 16)
+                    # USDT和USDC都是18位小数
+                    balance = Decimal(balance_wei) / Decimal(10**18)
+                    return float(balance)
+                else:
+                    error_msg = result.get('error', {}).get('message', 'Unknown RPC error')
+                    raise Exception(f"RPC Error: {error_msg}")
+
+        except aiohttp.ClientError as e:
+            raise Exception(f"RPC Network error: {str(e)}")
+        except (ValueError, KeyError) as e:
+            raise Exception(f"RPC response format error: {str(e)}")
+
+    async def get_token_balance(self, address, contract_address):
+        """获取指定地址的ERC20代币余额（异步，自动故障转移）"""
+        if not self.is_valid_address(address):
+            raise ValueError(f"Invalid address: {address}")
+
+        if not self.is_valid_address(contract_address):
+            raise ValueError(f"Invalid contract address: {contract_address}")
+
+        # 优先使用RPC节点（更稳定，无API密钥限制）
+        try:
+            return await self.get_token_balance_via_rpc(address, contract_address)
+        except Exception as rpc_error:
+            # RPC失败，尝试使用Etherscan API作为备用
+            pass
+
+        # 备用：使用Etherscan API
         url = f"{self.base_url}"
         params = {
-            'chainid': self.chain_id,
             'module': 'account',
             'action': 'tokenbalance',
             'contractaddress': contract_address,
@@ -149,6 +209,10 @@ class BSCBalanceChecker:
             'tag': 'latest',
             'apikey': self.api_key
         }
+
+        # BSC API不需要chainid参数
+        if self.chain_id is not None:
+            params['chainid'] = self.chain_id
 
         try:
             session = await self.get_session()
